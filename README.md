@@ -1,10 +1,12 @@
-# cephadm to Rook, in place: a production migration write-up
+# cephadm-to-rook-in-place
+
+A production migration write-up: cephadm to Rook, in place.
 
 This repository documents how we moved a running production Ceph cluster from **cephadm** (Ubuntu hosts, Docker containers) to **Rook** (Talos Linux hosts, Kubernetes), one host at a time, **without moving any data**. The fsid, mon names and addresses, OSD ids, cephx keys, pools and CRUSH map were kept. Every OSD was started by Rook from the same LVM volumes it had under cephadm.
 
 We looked for a public report of anyone doing this and did not find one. Rook does not support it, and the Rook maintainers have said for years that they cannot test or document such a path. So this is not a recommendation. It is a record of what one team did, what broke, and how each step was checked, written so that the next person can judge the risk for their own cluster.
 
-Author: `<author>`
+Author: David Burks
 
 ## Results
 
@@ -21,6 +23,7 @@ Author: `<author>`
 | S3 | rebuilt as a new Rook object store and copied over in one evening window (Rook cannot serve a realm-less RGW zone) |
 | SMB | replaced by a single Samba (sambacc) pod; Rook has no SMB support |
 | cephadm | mgr module disabled and its state removed; cluster `HEALTH_OK` |
+| Performance afterwards | RBD (3x SSD) 517 MB/s write, 1167 MB/s read, 13.6k/33.3k 4K IOPS; CephFS (EC 5+2 HDD) 267/708 MB/s; no regression against the (thin) earlier numbers. See [docs/after-the-migration.md](docs/after-the-migration.md) |
 
 What is not done yet is listed in [Status](#status).
 
@@ -35,6 +38,7 @@ What is not done yet is listed in [Status](#status).
 | RGW rebuild and client cutover | done in production; the legacy zone and its pools are still on disk as a fallback, removal is planned after a 7-day soak |
 | SMB replacement | done in production |
 | cephadm decommission (module off, config-keys, stale config rows and cephx entities removed) | done in production |
+| Post-migration health and performance check, S3 LoadBalancer moved to fast nodes, dynamic CephFS PVC node-key cap fixed | done in production |
 | Re-enabling Rook's mon health checks, removing the `osd_crush_update_on_start` guard, turning the balancer and autoscaler back on | not done yet |
 | Adopting pools and filesystems as full Rook CRs (beyond MDS-only) | rehearsed in the lab only |
 | Moving from the external ceph-csi to Rook's CSI | rehearsed in the lab only |
@@ -86,8 +90,13 @@ Phase 4  Last host, then disable cephadm and remove its state
 | [docs/dell-13g-talos-boot.md](docs/dell-13g-talos-boot.md) | Getting Talos to boot cold on Dell R430/R730xd with HBA330 and PERC H730 controllers |
 | [docs/flux-freeze.md](docs/flux-freeze.md) | Freezing writers when a GitOps controller keeps undoing your freeze |
 | [docs/pitfalls.md](docs/pitfalls.md) | Every problem we hit: symptom, cause, fix, prevention |
+| [docs/after-the-migration.md](docs/after-the-migration.md) | Health and performance after the migration, the S3 LoadBalancer fix, dynamic CephFS PVC caps, the dashboard with an external Prometheus |
 | [docs/lessons-learned.md](docs/lessons-learned.md) | Operating discipline, what is general versus environment-specific, what we would do differently |
 | [examples/](examples/) | Sanitized manifests (CephCluster, seed objects, MDS-only CephFilesystem, CephObjectStore, Talos storage-node patch, Flux Kustomizations), the zero-movement gate script and the RGW copy helpers |
+
+## Updates
+
+This write-up will change as the remaining items are done (legacy RGW zone removal, mon health checks, guards) and as corrections come in. Changes are recorded in [CHANGELOG.md](CHANGELOG.md), and each published state is a tagged release (`v1.0.0` is the first). Cite a tag if you need a stable reference.
 
 ## Disclaimer
 

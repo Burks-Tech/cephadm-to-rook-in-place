@@ -25,6 +25,8 @@ Each entry: symptom, root cause, fix, prevention. The class says whether it is g
 | P-19 | A CephFS standby on the old stack takes the standby-replay slot | Ceph, general |
 | P-20 | Mgr dashboard port clashes | Rook plus cephadm, general |
 | P-21 | Rook rewrites `pg_num` of the shared `.rgw.root` pool | Rook, general |
+| P-22 | Dynamic CephFS PVCs bind but do not mount | ceph-csi, general |
+| P-23 | A LoadBalancer IP answered from a slow or multi-homed node | MetalLB, network |
 
 ## P-1. UEFI boot of the Talos installed disk fails (Dell 13G)
 
@@ -153,6 +155,19 @@ When Rook enables `allow_standby_replay`, the mon picks the cephadm standby (low
 ## P-21. Rook rewrites `pg_num` of the shared `.rgw.root` pool
 
 Creating a CephObjectStore made Rook apply the store's `metadataPool` settings plus a hardcoded `pg_num` and `pg_num_min` of 8 to the existing `.rgw.root` pool (shared with the legacy zone), merging it from 32 to 8 PGs. Crush rule and size were unchanged. Expect it and allow it in the POOLRULE gate; setting it back is futile, Rook re-applies it. Details: [rgw-rebuild.md](rgw-rebuild.md#deviations-and-findings).
+
+## P-22. Dynamic CephFS PVCs bind but do not mount
+
+- **Symptom.** A PVC on the dynamic CephFS StorageClass is Bound, the pod hangs in ContainerCreating with `rados: ret=-1, Operation not permitted` at NodeStage.
+- **Root cause.** The ceph-csi node key had no OSD cap on the CephFS metadata pool. Static PVs do not need it; dynamic PVs do, because NodeStage reads the volume journal (omap in the metadata pool, namespace `csi`). All our CephFS PVCs were static, so it surfaced only after the migration.
+- **Fix** [PROD]. Add `allow r tag cephfs metadata=<fs>` to the node key's `osd` cap (read-only is enough), or use a second key with that clause and its own StorageClass.
+- **Gotchas.** ceph-csi caches its RADOS connection per user, so a cap change appears not to work while pods keep retrying; do not restart the nodeplugin (it kills fuse mounts). Clean up test subvolumes with `--group_name csi`. Verify with a pod that mounts and writes, not with Bound. Details: [after-the-migration.md](after-the-migration.md#dynamic-cephfs-pvcs-need-a-metadata-pool-cap-on-the-node-key).
+
+## P-23. A LoadBalancer IP answered from a slow or multi-homed node
+
+- **Symptom.** LAN clients on 2.5G links got exactly 111 MB/s from S3; the LB IP had moved between nodes 12 times in 16 hours.
+- **Root cause.** MetalLB L2 mode answers ARP from one speaker; with the default advertisement that was a 1G node. The speakers did not run on the tainted storage nodes, so the only fast candidate was one control-plane node.
+- **Fix.** A dedicated `L2Advertisement` for the S3 pool with `nodeSelectors` limited to 10G/25G nodes, the speaker tolerating the storage taint, and `interfaces:` pinned to the Kubernetes VLAN interface so a multi-homed storage host never answers ARP for the LB IP on the Ceph network (the [P-5](#p-5-arp-flux-black-holes-routed-jumbo-traffic) class of failure).
 
 ## Smaller items
 

@@ -536,7 +536,7 @@ Lab-proven behaviours: operator restart, a forced operator kill mid-reconcile an
 
 We kept the external ceph-csi throughout (existing users; clusterID = fsid and the mon list survive because mon IPs are preserved) and set `csi.skipUserCreation: true`. The CSI takeover (Rook's ceph-csi-operator replacing hand-applied ceph-csi) was rehearsed in the lab: no PV recreated, fuse mounts survived, a Velero restore worked, but the CSIDriver object is recreated by the operator even when pre-annotated (a window of about 1m40s with `attachRequired` true and zero VolumeAttachments), so do the Driver CRs first and node by node. [PLANNED] for production.
 
-cephadm also ran Prometheus, Grafana and Alertmanager on one host. Before that host converted we pointed the dashboard at an existing external Prometheus (`dashboard.prometheusEndpoint`) and Alertmanager/Grafana (`cephConfig.mgr` entries for `mgr/dashboard/ALERTMANAGER_API_HOST` and `GRAFANA_API_URL`), so nothing depended on the cephadm stack when it disappeared. Note that the `PROMETHEUS_API_HOST` write crashed the dashboard and prometheus modules on a cephadm standby mgr that had a port clash ([P-20](pitfalls.md#p-20-mgr-dashboard-port-clashes)).
+cephadm also ran Prometheus, Grafana and Alertmanager on one host. Before that host converted we pointed the dashboard at an existing external Prometheus (`dashboard.prometheusEndpoint`) and Alertmanager/Grafana (`cephConfig.mgr` entries for `mgr/dashboard/ALERTMANAGER_API_HOST` and `GRAFANA_API_URL`), so nothing depended on the cephadm stack when it disappeared. The rest of the dashboard work (15 s scrape interval for its `rate(...[1m])` charts, Grafana embedding, why the logs tab never appears under Rook) is in [after-the-migration.md](after-the-migration.md#the-ceph-dashboard-with-an-external-prometheus). Note that the `PROMETHEUS_API_HOST` write crashed the dashboard and prometheus modules on a cephadm standby mgr that had a port clash ([P-20](pitfalls.md#p-20-mgr-dashboard-port-clashes)).
 
 ---
 
@@ -580,6 +580,8 @@ Rollback, if ever needed: restore keys and entities from the backup Secret (`cep
 5. Reboot proof of one host with the full Rook stack, and a documented Talos upgrade procedure for storage nodes (`--preserve`, the storage schematic).
 6. The cephx cipher migration (rotate older `aes` keys to `aes256k` where clients support it; until then the `AUTH_INSECURE_*` warnings are muted).
 
+Done after the decommission [PROD]: a health and performance check, archiving the old crash reports, moving the S3 LoadBalancer announcement to fast nodes, and the CephFS node-key cap for dynamic PVCs ([after-the-migration.md](after-the-migration.md)).
+
 ---
 
 ## 8. Gates and rollback, step by step
@@ -621,6 +623,7 @@ Every problem we hit, with symptom, root cause, fix and prevention, is in **[pit
 - Rook cannot serve a realm-less RGW zone, and it rewrites `pg_num` of the shared `.rgw.root` pool.
 - Hand-written Endpoints and other references keep pointing at daemons that no longer exist.
 - A GitOps controller undoes `kubectl`-level freezes of writers.
+- After the migration: a LoadBalancer IP announced from a slow or multi-homed node, and CSI paths you never exercised (dynamic CephFS PVCs).
 
 ---
 
@@ -773,6 +776,8 @@ Searches in October 2026 found no end-to-end public report of an in-place cephad
 | RGW rebuild, copy and client cutover | [PROD] |
 | SMB replacement | [PROD] |
 | cephadm decommission (modules, config-keys, config rows, cephx entities) | [PROD] |
+| Post-migration health and performance check, S3 LoadBalancer on fast nodes | [PROD] |
+| Dynamic CephFS PVC node-key cap | [PROD], applied to the live key and verified with a fresh dynamic PVC |
 | Deliberate mgr takeover sequence | [LAB] only (production moved the mgr by circumstance, 6.1) |
 | Adopted pool and filesystem CRs beyond MDS-only, CSI takeover | [LAB] / [PLANNED] |
 | Legacy RGW zone and pool removal, mon health checks, `osd_crush_update_on_start` guard removal, balancer and autoscaler back on, cipher migration | [PLANNED] |

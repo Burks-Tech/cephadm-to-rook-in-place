@@ -62,6 +62,7 @@ Notes:
 ## Endpoint design as built
 
 - **One LoadBalancer Service** in front of the three RGW pods (`http` 80 to 8081, `https` 443 to 8444), with its own static IP. Rook's own RGW Service is headless with hostNetwork, so clients use this one. `externalTrafficPolicy: Cluster`, because the MetalLB speakers run only on the ordinary Kubernetes nodes, not on the tainted storage nodes.
+- **Announce the LB IP only from fast nodes, on the Kubernetes VLAN interface.** With MetalLB's default L2 advertisement the IP was answered by a 1G control-plane node and LAN S3 capped at 1 Gbit. We added a dedicated advertisement limited to 10G/25G nodes and pinned to their VLAN interface ([after-the-migration.md](after-the-migration.md#s3-loadbalancer-announce-only-from-fast-nodes-on-the-right-interface)).
 - **In-cluster clients:** `http://<lb-service>.rook-ceph.svc.cluster.local`.
 - **LAN clients:** `https://s3.example.com`, resolving to the LB IP (split-horizon DNS); RGW terminates TLS itself with a cert-manager certificate. No reverse proxy in the path.
 - **Off-LAN clients:** a CDN tunnel whose origin is the in-cluster Service on port 80 (Host header kept).

@@ -13,7 +13,7 @@ This repository uses two licences:
 
 MIT License
 
-Copyright (c) 2026 <author>
+Copyright (c) 2026 David Burks
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
