@@ -9,6 +9,16 @@ Planned, as the remaining steps are done in production:
 - Legacy RGW zone and pool removal (planned after a 7-day soak from the S3 cutover).
 - Re-enabling Rook's mon health checks, removing the `osd_crush_update_on_start` guard, turning the balancer and autoscaler back on.
 
+## [1.0.1] - 2026-10-24
+
+### Changed
+
+- Benchmark figures removed from the README and `docs/after-the-migration.md`. The performance section now gives the method and the findings. A re-run the same afternoon from the fastest clients, with more parallelism, repeated the single-job results and confirmed the conclusion: no regression.
+
+### Fixed
+
+- The 1.0.0 LAN S3 result was blamed only on the 1G LoadBalancer announcer; the test workstation was also behind a 1G switch uplink (`docs/after-the-migration.md`, `docs/pitfalls.md` P-23).
+
 ## [1.0.0] - 2026-10-24
 
 ### Added
@@ -24,5 +34,6 @@ Planned, as the remaining steps are done in production:
 - `examples/`: CephCluster, seed objects, MDS-only and adopted CephFilesystem, CephObjectStore and its Service, Talos storage-node patch, Flux Kustomizations and operator HelmRelease, the zero-movement gate script, RGW copy helpers.
 - Licences: CC BY 4.0 for documentation, MIT for scripts and examples.
 
-[Unreleased]: https://github.com/Burks-Tech/cephadm-to-rook-in-place/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Burks-Tech/cephadm-to-rook-in-place/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Burks-Tech/cephadm-to-rook-in-place/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Burks-Tech/cephadm-to-rook-in-place/releases/tag/v1.0.0

@@ -13,47 +13,16 @@ What we checked and fixed in the first day after the last host and the cephadm d
 
 ## Performance after the migration
 
-All test objects (namespace, PVCs, PVs, subvolume, RBD image, RGW user and bucket) were removed afterwards. No pools were created and `rados bench` was not run. The RBD and CephFS tests ran from a Kubernetes node with a 25G NIC, so they measure Ceph rather than a 1G client link. fio: libaio, `direct=1`, `numjobs=1`, 60 s per test. A monitor sampled cluster IO, the worst OSD commit latency and slow ops every 10 s, with an automatic kill on slow ops; it never fired.
+We benchmarked block (RBD), file (CephFS) and object (S3) storage after the decommission [PROD]: fio on an RBD and a CephFS volume, `rbd bench`, and warp against the object store, all from our fastest Kubernetes node (25GbE), plus S3 over HTTPS from a 2.5GbE workstation on the LAN. A first pass ran in the morning; a re-run that afternoon with more parallelism repeated its single-job results. A monitor sampled cluster IO, the worst OSD commit latency and slow ops every 10 s and would have stopped the load on slow ops; it never fired. All test objects were removed afterwards, no pools were created and `rados bench` was not run.
 
-### RBD (replicated 3x on SSD, 8 OSDs; 20 GiB PVC, 8 GiB file)
+This page gives the findings, not the figures:
 
-| Test | Bandwidth | IOPS | avg lat | p99 | p99.9 |
-|---|---|---|---|---|---|
-| seq write 1M QD16 | 517 MB/s | 492 | 32 ms | 61 ms | 72 ms |
-| seq read 1M QD16 | 1167 MB/s | 1113 | 14 ms | 37 ms | 49 ms |
-| rand write 4k QD32 | 56 MB/s | 13.6k | 2.3 ms | 4.3 ms | 11.5 ms |
-| rand read 4k QD32 | 136 MB/s | 33.3k | 0.95 ms | 2.0 ms | 5.3 ms |
-
-`rbd bench` from the toolbox: 448 MiB/s write and 1.9 GiB/s read (4M, 16 threads); 4K random 49.2k write IOPS (inflated by the librbd writeback cache; trust fio) and 51.2k read IOPS.
-
-### CephFS (data pool EC 5+2 on HDD; 4 GiB file, kernel client)
-
-| Test | Bandwidth | IOPS | avg lat | p99 | p99.9 |
-|---|---|---|---|---|---|
-| seq write 1M QD16 | 267 MB/s | 254 | 62 ms | 139 ms | 1216 ms |
-| seq read 1M QD16 | 708 MB/s | 675 | 23 ms | 100 ms | 165 ms |
-| rand write 4k QD32 | 5 MB/s | 1107 | 29 ms | 165 ms | 246 ms |
-| rand read 4k QD32 | 50 MB/s | 12.3k | 2.6 ms | 26 ms | 62 ms |
-
-The 4K random read figure is optimistic: the 4 GiB hot set was mostly in OSD cache.
-
-### RGW
-
-| Test | Result |
-|---|---|
-| In-cluster, warp mixed, 16 MiB objects, 16 concurrent, 2 min | 706 MiB/s total (GET 530, PUT 177 MiB/s). HDD OSD commit latency rose to 80 to 183 ms under PUT load; no slow ops. |
-| In-cluster, warp mixed, 64 KiB objects, 32 concurrent, 1 min | 3733 objects/s (GET 1680, PUT 560, STAT 1120, DELETE 373) |
-| LAN workstation (2.5G) over HTTPS, 1 GiB as 16 x 64 MiB, 8 concurrent | PUT 111 MB/s, GET 112 MB/s: a hard 1 Gbit cap (see below) |
-
-### Compared with before
-
-We had no earlier RBD or RGW baseline. For CephFS the earlier numbers came from a workstation client during the previous Ceph upgrade, so the comparison is rough, but every comparable metric was equal or better (sequential write 103 to 267 MB/s, sequential read 359 to 708 MB/s, 4K random write 840 to 1107 IOPS). Nothing points to a regression from moving to Rook. **If you do this, take your own baseline before you start.** We wish we had.
-
-### What the tests found
-
-1. **Most clients are on 1G links**, so pods on those nodes cap at about 110 MB/s to Ceph whatever the cluster can do.
-2. **The S3 LoadBalancer IP was announced from a 1G node.** MetalLB in L2 mode picks one speaker to answer ARP for the IP, and with the default advertisement that was a 1G control-plane node (it also moved 12 times in 16 hours). All LAN S3 traffic took one 1G hop. Fixed below.
-3. **Dynamic CephFS PVCs bound but could not mount.** Fixed below.
+- **No regression.** Every metric we could compare with measurements from before the migration was equal or better. We had no earlier RBD or RGW baseline, and the earlier CephFS numbers came from a different client, so the comparison is rough. **If you do this, take your own baseline before you start.** We wish we had.
+- **One client running one fio job is not the cluster's limit.** With four parallel jobs the same client got clearly more RBD bandwidth and IOPS; CephFS on HDD gained mainly on sequential writes. Use several jobs, or several clients, before drawing conclusions about the cluster.
+- **Most pods are limited by their node's link.** Most of our Kubernetes nodes are on 1G, so pods there hit their own link long before the cluster's limits. The 25G node was not the limit in any test.
+- **Check the client's own path first.** The LAN S3 test first ran at exactly 1 Gbit/s. The LoadBalancer IP was announced from a 1G node (fixed below), and the test workstation also sat behind a 1G switch uplink, so the result was capped twice. After both fixes the workstation was limited only by its own link. An iperf3 run from the client to a fast node shows a cap like that at once.
+- **Benchmark the CephFS kernel client with `direct=1` if your kernel has the page-cache leak.** Ours leaks on buffered CephFS writes (Ceph tracker #74156, fixed in Linux 7.0.10 and 7.1). fio's O_DIRECT writes bypass the page cache, and the client's memory did not move during the CephFS write tests.
+- **Dynamic CephFS PVCs bound but could not mount.** Fixed below.
 
 ## S3 LoadBalancer: announce only from fast nodes, on the right interface
 
