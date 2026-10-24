@@ -1,0 +1,67 @@
+# Talos machine-config patch for one Ceph storage host (here ceph-1), applied on top of the base worker config.
+# Sanitized example: MACs, WWN, addresses and the schematic id are placeholders or documentation ranges.
+#
+#   talosctl machineconfig patch worker.yaml --patch @storage-node-patch.yml --patch @kubelet-image.yml -o ceph-1.yaml
+#   talosctl validate --config ceph-1.yaml --mode metal --strict
+#   talosctl apply-config --insecure --nodes 192.0.2.21 --endpoints 192.0.2.21 --file ceph-1.yaml
+# The rendered file contains cluster secrets: keep it out of Git and delete it after the window.
+#
+# Network shape: one storage NIC port carries both networks.
+#   native/untagged VLAN  = Ceph network        192.0.2.0/24   (the host keeps its old Ceph IP)
+#   tagged VLAN 100       = Kubernetes network  198.51.100.0/24
+# Do NOT add a fleet-wide route for the Ceph range via the switch here: if it is more specific than the connected Ceph
+# prefix it pushes Ceph-to-Ceph traffic out the Kubernetes VLAN.
+machine:
+  # ARP-flux guard. Required on multi-homed storage hosts: without it a link-up onboard port (e.g. one shared with the BMC)
+  # can answer ARP for the Ceph IP, and routed jumbo frames get black-holed.
+  sysctls:
+    net.ipv4.conf.all.arp_ignore: "1"
+    net.ipv4.conf.default.arp_ignore: "1"
+    net.ipv4.conf.all.arp_announce: "2"
+    net.ipv4.conf.default.arp_announce: "2"
+  network:
+    hostname: ceph-1                      # = the existing CRUSH host bucket name
+    interfaces:
+      - deviceSelector:
+          hardwareAddr: "<storage-nic-mac>"
+          physical: true                  # REQUIRED: VLAN sub-interfaces share the MAC; without it Talos stacks VLANs on VLANs
+        mtu: 9000
+        dhcp: false
+        addresses:
+          - 192.0.2.21/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: 192.0.2.1            # default route on the Ceph VLAN, as before, so replies to Ceph clients stay symmetric
+        vlans:
+          - vlanId: 100
+            mtu: 9000
+            dhcp: false
+            addresses:
+              - 198.51.100.41/24
+      # Every other port: ignore it, selected by MAC (names can differ on Talos). Ignored ports can still be link-up.
+      - deviceSelector:
+          hardwareAddr: "<second-port-mac>"
+          physical: true
+        ignore: true
+    nameservers:
+      - <dns-1>
+      - <dns-2>
+
+  kubelet:
+    nodeIP:
+      validSubnets:
+        - 198.51.100.0/24                 # register the node on the Kubernetes network
+
+  # No topology.kubernetes.io/* labels: Rook turns them into CRUSH buckets (data movement).
+  nodeLabels:
+    ceph-storage-node: "true"
+  nodeTaints:
+    ceph-storage-node: "true:NoSchedule"  # only Rook daemons (with the toleration) and per-node daemons run here
+
+  # Install disk: the NEW boot SSD, by WWN only (disk letters shift between boots). Confirm in maintenance mode with
+  # `talosctl get disks` (wwid naa.<wwn>, lower case) before applying. Never /dev/sdX. Never list OSD disks under machine.disks.
+  # wipe: true wipes ONLY the install disk (reused disks carry old partitions, RAID or LVM metadata).
+  install:
+    disk: /dev/disk/by-id/wwn-0x<boot-disk-wwn>
+    image: factory.talos.dev/metal-installer/<storage-schematic-id>:v1.14.2   # schematic: CPU microcode + util-linux-tools
+    wipe: true

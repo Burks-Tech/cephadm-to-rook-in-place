@@ -1,0 +1,81 @@
+---
+# Flux Kustomizations for Rook objects during (and after) an adoption.
+# Every Kustomization that carries Rook CRs uses the same brakes:
+#   prune: false            nothing it created is garbage-collected, even if a file leaves the repo
+#   deletionPolicy: Orphan  deleting the Kustomization (or a parent pruning it) leaves every applied object in place
+#   force: false            never delete-and-recreate on an immutable-field conflict (recreating a CephFilesystem runs `fs fail`)
+#   wait: false             for CRs whose status Rook owns (Progressing for minutes is normal)
+# Each CR file also carries `kustomize.toolkit.fluxcd.io/prune: disabled`. Prove the brakes with a sentinel ConfigMap, never a real CR.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: rook-ceph-csi-crds              # the six csi.ceph.io CRDs: required by the v1.21.0 operator even with CSI off
+  namespace: flux-system
+spec:
+  interval: 30m
+  sourceRef: {kind: GitRepository, name: flux-system}
+  path: ./kubernetes/infrastructure/rook-ceph/csi-crds
+  prune: false
+  deletionPolicy: Orphan
+  force: false
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: rook-ceph-operator
+  namespace: flux-system
+spec:
+  interval: 30m
+  sourceRef: {kind: GitRepository, name: flux-system}
+  path: ./kubernetes/infrastructure/rook-ceph/operator
+  prune: false
+  deletionPolicy: Orphan
+  force: false
+  wait: true
+  dependsOn:
+    - name: rook-ceph-csi-crds
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: rook-ceph-cluster               # the CephCluster
+  namespace: flux-system
+spec:
+  interval: 30m
+  sourceRef: {kind: GitRepository, name: flux-system}
+  path: ./kubernetes/infrastructure/rook-ceph/cluster
+  prune: false
+  deletionPolicy: Orphan
+  force: false
+  wait: false
+  dependsOn:
+    - name: rook-ceph-operator
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: rook-ceph-adopted-crs           # CephFilesystems (MDS-only, later adopted), later pools. One CR file per commit.
+  namespace: flux-system
+spec:
+  interval: 30m
+  sourceRef: {kind: GitRepository, name: flux-system}
+  path: ./kubernetes/infrastructure/rook-ceph/adopted-crs
+  prune: false
+  deletionPolicy: Orphan
+  force: false
+  wait: false
+  dependsOn:
+    - name: rook-ceph-cluster
+---
+# Sentinel: keeps the adopted-crs build non-empty before the first CR (an empty build fails), and is the object you
+# use to prove that deleting the Kustomization leaves its objects in place.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rook-ceph-adopted-crs-sentinel
+  namespace: rook-ceph
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+data:
+  purpose: "keeps the adopted-crs build non-empty; never pruned"

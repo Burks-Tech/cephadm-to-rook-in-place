@@ -1,0 +1,133 @@
+---
+# One-shot copy of buckets from the legacy RGW zone into the new Rook store, with per-bucket gates (G-DATA).
+# Not meant for GitOps: create it by hand inside the freeze, read the logs, delete it.
+#   kubectl -n rook-ceph create -f copy-job.yml
+#   kubectl -n rook-ceph logs -f job/rgw-migrate-copy -c mkbuckets ; kubectl -n rook-ceph logs -f job/rgw-migrate-copy -c copy
+#
+# Credentials: each bucket is created and written WITH ITS OWNER'S OWN KEY, so bucket and object ownership in the new zone equal
+# the old (an admin user would become the owner of every copied object, and the bucket owner could then be denied access).
+# Secret `rgw-migrate-creds` holds <OWNER>_AK / <OWNER>_SK pairs; build it from the users' keys without displaying them.
+# BUCKETS lists "bucket:OWNER[:objlock]". Versioning and lifecycle are re-applied in mkbuckets: add one line per bucket that needs it.
+# Copies CURRENT object versions only. For a delta pass after a leaked freeze, re-run with SYNC_BUCKETS for buckets with deletes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rgw-migrate-copy
+  namespace: rook-ceph
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: rgw-migrate-copy
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:                      # keep the copy load off the storage nodes
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: ceph-storage-node
+                    operator: NotIn
+                    values: ["true"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: work
+          emptyDir: {}
+      initContainers:
+        - name: mkbuckets
+          image: amazon/aws-cli:2.38.5
+          env:
+            - {name: EP, value: "http://rook-ceph-rgw-s3-lb.rook-ceph.svc.cluster.local"}
+            - {name: BUCKETS, value: "backups-a:OWNER_A backups-b:OWNER_B:objlock app-c:OWNER_C"}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              export HOME=/work AWS_DEFAULT_REGION=us-east-1 AWS_REQUEST_CHECKSUM_CALCULATION=when_required AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+              aws configure set default.s3.addressing_style path
+              rc=0
+              as() { local o=$1; shift; local ak="${o}_AK" sk="${o}_SK"; AWS_ACCESS_KEY_ID="${!ak}" AWS_SECRET_ACCESS_KEY="${!sk}" aws --endpoint-url "$EP" "$@"; }
+              for spec in $BUCKETS; do
+                IFS=: read -r b o lock <<< "$spec"
+                # NOTE: head-bucket fails for SUSPENDED owners; leave their (unchanged) buckets out of a delta run
+                if as "$o" s3api head-bucket --bucket "$b" >/dev/null 2>&1; then echo "EXISTS $b"; continue; fi
+                if [ "${lock:-}" = objlock ]; then as "$o" s3api create-bucket --bucket "$b" --object-lock-enabled-for-bucket >/dev/null || { echo "FAIL create $b"; rc=1; continue; }
+                else as "$o" s3api create-bucket --bucket "$b" >/dev/null || { echo "FAIL create $b"; rc=1; continue; }; fi
+                echo "CREATED $b as $o"
+              done
+              # per-bucket settings, copied from the legacy snapshot, e.g.:
+              # as OWNER_A s3api put-bucket-versioning --bucket backups-a --versioning-configuration Status=Enabled
+              # as OWNER_A s3api put-bucket-lifecycle-configuration --bucket backups-a --lifecycle-configuration "$LC_JSON"
+              exit $rc
+          envFrom:
+            - secretRef:
+                name: rgw-migrate-creds
+          volumeMounts:
+            - {name: work, mountPath: /work}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {memory: "1Gi"}
+      containers:
+        - name: copy
+          image: rclone/rclone:1.75.2
+          env:
+            - {name: SRC_EP, value: "http://192.0.2.21:7480"}        # the legacy RGW directly; every other client is frozen out
+            - {name: DST_EP, value: "http://rook-ceph-rgw-s3-lb.rook-ceph.svc.cluster.local"}
+            - {name: BUCKETS, value: "backups-a:OWNER_A backups-b:OWNER_B app-c:OWNER_C"}
+            - {name: SYNC_BUCKETS, value: ""}                         # delta pass: buckets where deletes must propagate
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              export HOME=/work XDG_CACHE_HOME=/work/cache XDG_CONFIG_HOME=/work/cfg
+              export RCLONE_CONFIG_SRC_TYPE=s3 RCLONE_CONFIG_SRC_PROVIDER=Ceph RCLONE_CONFIG_SRC_ENDPOINT=$SRC_EP RCLONE_CONFIG_SRC_FORCE_PATH_STYLE=true
+              export RCLONE_CONFIG_DST_TYPE=s3 RCLONE_CONFIG_DST_PROVIDER=Ceph RCLONE_CONFIG_DST_ENDPOINT=$DST_EP RCLONE_CONFIG_DST_FORCE_PATH_STYLE=true RCLONE_CONFIG_DST_NO_CHECK_BUCKET=true
+              run() { # owner cmd...  (both remotes use the owner's key for this one rclone call)
+                o=$1; shift
+                eval "ak=\${${o}_AK}; sk=\${${o}_SK}"
+                RCLONE_CONFIG_SRC_ACCESS_KEY_ID="$ak" RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY="$sk" \
+                RCLONE_CONFIG_DST_ACCESS_KEY_ID="$ak" RCLONE_CONFIG_DST_SECRET_ACCESS_KEY="$sk" "$@"
+              }
+              FLAGS="-M --fast-list --s3-chunk-size 32M --s3-upload-cutoff 64M --s3-upload-concurrency 2 --retries 5 --low-level-retries 20 --stats 60s --stats-one-line --log-level NOTICE --transfers 8 --checkers 32"
+              T0=$(date +%s)
+              for spec in $BUCKETS; do
+                b=${spec%%:*}; o=${spec#*:}; o=${o%%:*}
+                verb=copy; case " $SYNC_BUCKETS " in *" $b "*) verb=sync;; esac
+                ( echo "START $b $verb"; run "$o" rclone $verb "src:$b" "dst:$b" $FLAGS > "/work/$b.log" 2>&1; echo "DONE  $b rc=$?" ) &
+              done
+              wait
+              echo "COPY FINISHED in $(( $(date +%s) - T0 )) s"
+              fail=0
+              for spec in $BUCKETS; do
+                b=${spec%%:*}; o=${spec#*:}; o=${o%%:*}
+                s=$(run "$o" rclone size "src:$b" --fast-list --json); d=$(run "$o" rclone size "dst:$b" --fast-list --json)
+                run "$o" rclone check "src:$b" "dst:$b" --one-way --fast-list --checkers 32 > "/work/$b.check" 2>&1; crc=$?
+                run "$o" rclone lsf -R --files-only --fast-list "src:$b" | shuf -n 100 > "/work/$b.sample"
+                if [ -s "/work/$b.sample" ]; then run "$o" rclone check "src:$b" "dst:$b" --download --files-from "/work/$b.sample" > "/work/$b.dl" 2>&1; drc=$?; else drc=0; fi
+                ok=GOOD; [ "$s" = "$d" ] && [ $crc -eq 0 ] && [ $drc -eq 0 ] || { ok=BAD; fail=1; }
+                echo "GATE $ok $b src=$s dst=$d check_rc=$crc sample_rc=$drc $(grep -oE '[0-9]+ (differences|hashes could not be checked|matching files)' /work/$b.check | tr '\n' ' ')"
+              done
+              echo "G-DATA $([ $fail -eq 0 ] && echo PASS || echo FAIL)"
+              sleep 3600   # keep the pod and its /work logs for inspection; delete the Job to end it
+              exit $fail
+          envFrom:
+            - secretRef:
+                name: rgw-migrate-creds
+          volumeMounts:
+            - {name: work, mountPath: /work}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: "2", memory: "1Gi"}
+            limits: {memory: "4Gi"}

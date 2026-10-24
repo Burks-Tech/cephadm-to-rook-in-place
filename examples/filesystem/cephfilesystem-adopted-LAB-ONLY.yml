@@ -1,0 +1,39 @@
+---
+# Fully adopted CephFilesystem (pools under Rook management). [LAB] only: rehearsed on a 4-host lab with EC 2+2, NOT run in production.
+# Shape for a filesystem whose metadata pool is replicated on SSD and whose DEFAULT data pool is EC on HDD.
+#
+# Before committing:
+#   - every size / k / m below must equal the live pool (a different value makes Rook run `osd pool set ... size`)
+#   - deviceClass + failureDomain must match the pool's current CRUSH rule (otherwise Rook creates a stray class-less rule)
+#   - `nodelete` on both pools, `mon_allow_pool_delete=false` in the mon section
+# Expected diffs: an unreferenced `<pool>_ecprofile` EC profile (compare its parameters with the live profile; different = hold),
+# `allow_ec_overwrites true` re-issued every reconcile, `osd pool create` returning "already exists".
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystem
+metadata:
+  name: <fs-name>
+  namespace: rook-ceph
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  preservePoolNames: true                 # mandatory when pool names are not <fs>-metadata / <fs>-<name>
+  preserveFilesystemOnDelete: true        # set explicitly: preservePoolsOnDelete alone does not protect the filesystem
+  preservePoolsOnDelete: true
+  metadataPool:
+    name: <metadata-pool-name>
+    failureDomain: host
+    deviceClass: ssd
+    replicated:
+      size: 3
+  dataPools:
+    - name: <data-pool-name>
+      failureDomain: host                 # inert for an existing EC pool; only shapes the unreferenced profile
+      deviceClass: hdd
+      erasureCoded:
+        dataChunks: 5
+        codingChunks: 2
+        algorithm: jerasure
+  metadataServer:
+    # ... IDENTICAL to the MDS-only form (cephfilesystem-mds-only.yml)
+    activeCount: 1
+    activeStandby: true

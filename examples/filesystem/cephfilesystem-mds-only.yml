@@ -1,0 +1,62 @@
+---
+# MDS-only CephFilesystem for an EXISTING CephFS. [PROD]
+# metadataPool {} and dataPools [] (the CRD requires both keys): Rook creates no pool and no filesystem, it only runs MDS daemons
+# and issues `fs set allow_standby_replay`, `fs set standby_count_wanted` and `fs subvolumegroup create <fs> csi`.
+#
+# Handover order: apply this CR; stop the cephadm STANDBY; check a Rook MDS is up:standby-replay; only then stop the cephadm ACTIVE.
+#
+# NEVER delete this CR: deletion runs `fs fail` (an outage for every client of the filesystem). To park the MDS, scale the
+# operator and the MDS Deployments to 0.
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystem
+metadata:
+  name: <fs-name>                         # = the existing filesystem name
+  namespace: rook-ceph
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  metadataPool: {}
+  dataPools: []
+  preserveFilesystemOnDelete: true
+  # Keep this block IDENTICAL in the later fully adopted form, so promoting the CR does not roll the MDS.
+  metadataServer:
+    activeCount: 1                        # = max_mds
+    activeStandby: true                   # one standby-replay per rank; Rook cannot create plain standbys
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "2Gi"
+      limits:
+        memory: "8Gi"                     # Rook sets the per-daemon mds_cache_memory_limit = 0.5 x limit (4 GiB here)
+    livenessProbe:                        # loosened: the MDS admin socket can stall during cap recall, and a kill is a failover
+      probe:
+        initialDelaySeconds: 10
+        timeoutSeconds: 30
+        periodSeconds: 30
+        failureThreshold: 10
+    # NO startupProbe override: Rook uses a user startupProbe verbatim and the Deployment is rejected without a handler.
+    placement:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: ceph-storage-node
+                  operator: In
+                  values: ["true"]
+      tolerations:
+        - key: ceph-storage-node
+          operator: Exists
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:     # active and standby-replay of one filesystem never share a node
+          - topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app: rook-ceph-mds
+                rook_file_system: <fs-name>
+        preferredDuringSchedulingIgnoredDuringExecution:    # keep different filesystems' MDS pods apart when possible
+          - weight: 50
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: rook-ceph-mds

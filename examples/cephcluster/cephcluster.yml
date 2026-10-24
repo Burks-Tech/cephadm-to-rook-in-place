@@ -1,0 +1,169 @@
+---
+# CephCluster for an in-place cephadm -> Rook adoption (Rook v1.21.0, Ceph 20.2.4).
+# Sanitized example. Values in <angle brackets> are placeholders. Addresses use documentation ranges.
+#
+# Life cycle of this file (one Git commit per step, never kubectl patch: a GitOps controller reverts patches and the revert rolls Rook again):
+#   1. Phase 1: exactly as below but with `storage.nodes: []` and WITHOUT the placement.mon.nodeAffinity block.
+#      Every mon/mgr pod stays Pending (the seeded mon-endpoints mapping pins mons to hostnames that are not Kubernetes nodes yet).
+#   2. After the first storage node is Ready: add the placement.mon.nodeAffinity block (rolls Rook mons one at a time).
+#   3. One `storage.nodes` entry per host window.
+#   4. After the last host: set healthCheck.daemonHealth.mon.disabled to false (sweep Completed mon pods first),
+#      remove the osd_crush_update_on_start guard (plus `ceph config rm global osd_crush_update_on_start`).
+#
+# NEVER delete this CR. With cleanupPolicy empty the data survives, but every Rook daemon is torn down.
+apiVersion: ceph.rook.io/v1
+kind: CephCluster
+metadata:
+  name: rook-ceph
+  namespace: rook-ceph
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  cephVersion:
+    # Exactly the build cephadm runs (`ceph config get mon container_image`). Digest, not tag.
+    # A different build, even at the same version, is treated as an upgrade (health checks, MDS upgrade logic, mon start failures abort).
+    image: quay.io/ceph/ceph@<digest-of-the-running-image>
+    allowUnsupported: false
+  dataDirHostPath: /var/lib/rook          # immutable; on Talos this is the EPHEMERAL partition of the boot disk (mon store ~200 MB)
+
+  skipUpgradeChecks: false
+  continueUpgradeAfterChecksEvenIfNotHealthy: false
+
+  network:
+    provider: host                        # daemons bind the host's Ceph address, as under cephadm; mon IPs come from the seed
+    addressRanges:
+      public: ["192.0.2.0/24"]            # = the existing mon public_network. No cluster range if you have no cluster_network.
+      # Do NOT set connections.requireMsgr2 or encryption if you have old kernel clients.
+
+  mon:
+    count: 7                              # = number of seeded mons; needs at least as many Node objects (any nodes) to pass validation
+    allowMultiplePerNode: false
+
+  mgr:
+    count: 2                              # one mgr per node: the second stays Pending until two storage nodes exist
+    allowMultiplePerNode: false
+    modules:                              # never list dashboard or prometheus here (Rook drives them itself)
+      - name: iostat
+        enabled: true
+      - name: snap_schedule
+        enabled: true
+
+  dashboard:
+    enabled: true                         # false makes Rook run `mgr module disable dashboard`
+    ssl: false                            # we serve it behind a TLS-terminating reverse proxy; ssl true is the Rook default
+    port: 8080                            # cluster-wide mgr setting: check every hostNetwork listener on mgr nodes for clashes
+    prometheusEndpoint: "http://<prometheus-host>:9090"   # Rook writes PROMETHEUS_API_HOST from this unconditionally (unset blanks it)
+    prometheusEndpointSSLVerify: true
+
+  crashCollector:
+    disable: false
+
+  healthCheck:
+    daemonHealth:
+      mon:
+        disabled: true                    # OFF until every mon is a Rook pod (Pending seeded mons would otherwise be failed over)
+    # Loosened probes, in the FIRST commit (no Rook daemon exists yet, so it rolls nothing). Rook's defaults killed slow daemons in the lab.
+    livenessProbe:
+      mon:
+        probe: {initialDelaySeconds: 10, timeoutSeconds: 30, periodSeconds: 30, failureThreshold: 10}
+      mgr:
+        probe: {initialDelaySeconds: 10, timeoutSeconds: 30, periodSeconds: 30, failureThreshold: 10}
+      osd:
+        probe: {initialDelaySeconds: 10, timeoutSeconds: 30, periodSeconds: 30, failureThreshold: 10}
+    startupProbe:
+      mon:
+        probe: {initialDelaySeconds: 10, timeoutSeconds: 30, periodSeconds: 10, failureThreshold: 60}    # 10 min: an adopted mon syncs its store
+      mgr:
+        probe: {initialDelaySeconds: 10, timeoutSeconds: 30, periodSeconds: 10, failureThreshold: 30}    # 5 min
+      osd:
+        probe: {initialDelaySeconds: 10, timeoutSeconds: 30, periodSeconds: 10, failureThreshold: 720}   # Rook default (2 h)
+
+  # Written to the mon config store on the first reconcile. Rook never unsets a key later: removing an entry here does not remove it from Ceph.
+  cephConfig:
+    global:
+      osd_crush_update_on_start: "false"  # a started OSD must not re-place itself in CRUSH (protects explicitly classed OSDs)
+    mon:
+      mon_allow_pool_delete: "false"      # Rook sets the GLOBAL value to true on every reconcile; the mon section wins
+    mgr:
+      # Optional: point the dashboard at an Alertmanager/Grafana that survive the cephadm monitoring stack.
+      mgr/dashboard/ALERTMANAGER_API_HOST: "http://<alertmanager-host>:9093"
+      mgr/dashboard/GRAFANA_API_URL: "http://<grafana-host>:3000"
+
+  csi:
+    skipUserCreation: true                # must be present on the FIRST reconcile: an external ceph-csi keeps its own users and caps
+
+  # No `placement.all`: the rook-ceph-detect-version Job takes mon placement merged with `all`; a required storage-node affinity
+  # there leaves the Job Pending before any storage node exists and stalls the whole reconcile.
+  placement:
+    mon:
+      tolerations:
+        - key: ceph-storage-node
+          operator: Exists
+      # Step 2 (after the first storage node is Ready). Without it a Rook mon could be failed over onto an ordinary node.
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: ceph-storage-node
+                  operator: In
+                  values: ["true"]
+    mgr: &storage-only
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: ceph-storage-node
+                  operator: In
+                  values: ["true"]
+      tolerations:
+        - key: ceph-storage-node
+          operator: Exists
+    osd: *storage-only
+    prepareosd: *storage-only
+    cleanup: *storage-only
+
+  storage:
+    useAllNodes: false                    # hosts are added one per window
+    useAllDevices: false
+    allowDeviceClassUpdate: false         # else Rook may `osd crush set-device-class` on adopted OSDs (nvme -> ssd = data movement)
+    allowOsdCrushWeightUpdate: false
+    # Phase 1: nodes: []
+    # Per host window: one name-only entry. The prepare job finds the existing ceph-volume LVM OSDs by their ceph.cluster_fsid
+    # LV tag and starts the SAME ids without formatting anything. No devices, no deviceFilter.
+    # OSD memory: Rook passes osd_memory_target = 0.8 x the pod memory LIMIT on the command line (it beats the config DB).
+    # Carry the cephadm per-host value over: requests.memory = target, limits.memory = ceil(target / 0.8). No CPU limit.
+    # Do NOT add resources.osd-hdd / osd-ssd / osd-nvme: they override node-level resources.
+    nodes:
+      - name: ceph-3                      # must equal the node's kubernetes.io/hostname label AND the CRUSH host bucket
+        resources:
+          requests: {cpu: "500m", memory: "5072Mi"}
+          limits: {memory: "6340Mi"}
+      - name: ceph-2
+        resources:
+          requests: {cpu: "500m", memory: "5267Mi"}
+          limits: {memory: "6583Mi"}
+      # ... one entry per converted host
+
+  removeOSDsIfOutAndSafeToRemove: false   # never auto-remove an OSD
+  cleanupPolicy:
+    confirmation: ""                      # never "yes-really-destroy-data"
+  disruptionManagement:
+    managePodBudgets: false               # Rook PDBs would also block node drains (note: Rook still creates a zero-disruption mgr PDB)
+
+  resources:
+    mon:
+      requests: {cpu: "500m", memory: "1Gi"}
+      limits: {memory: "2Gi"}
+    mgr:
+      requests: {cpu: "500m", memory: "1Gi"}
+      limits: {memory: "2Gi"}
+    mgr-sidecar:
+      requests: {cpu: "10m", memory: "32Mi"}
+      limits: {memory: "128Mi"}
+    crashcollector:
+      requests: {cpu: "10m", memory: "32Mi"}
+      limits: {memory: "128Mi"}
+    exporter:
+      requests: {cpu: "10m", memory: "32Mi"}
+      limits: {memory: "128Mi"}
+    # `osd` deliberately not set cluster-wide: per node above.

@@ -1,0 +1,49 @@
+---
+# Rook operator, pinned (chart AND image) for the whole migration. Do not let a dependency bot bump it mid-migration:
+# the lab evidence (CRD fields, MDS cache factor, pool behaviour, the orchestrator-backend reset on Ceph 20.2.2-20.2.4)
+# is for one version only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rook-ceph
+  labels:
+    pod-security.kubernetes.io/enforce: privileged   # mon, OSD and prepare pods use hostPath and privileged mode
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled      # deleting the namespace deletes every Rook CR and the identity Secret
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: rook-ceph
+  namespace: rook-ceph
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: rook-ceph
+      version: "v1.21.0"
+      sourceRef:
+        kind: HelmRepository
+        name: rook-release                 # https://charts.rook.io/release
+        namespace: flux-system
+  upgrade:
+    remediation:
+      retries: 0                           # no automatic rollback of the operator
+  values:
+    image:
+      tag: v1.21.0
+    crds:
+      enabled: true                        # main CRDs carry helm.sh/resource-policy: keep; never set false later
+    logLevel: INFO
+    resources:
+      requests: {cpu: "200m", memory: "256Mi"}
+      limits: {memory: "1Gi"}              # sized for ~44 OSDs and 7 mons
+    deleteUnusedCrushRules: false          # default true would let the operator delete hand-made rules it thinks unused
+    enableDiscoveryDaemon: false           # OSD adoption does not use it
+    csi:
+      installCsiOperator: false            # keep the external ceph-csi
+      createCsiOperatorResources: false    # not in values.yaml, but the chart template reads it

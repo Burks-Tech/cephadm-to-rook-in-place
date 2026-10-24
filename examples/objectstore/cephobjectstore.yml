@@ -1,0 +1,73 @@
+---
+# A NEW single-site Rook object store, built next to a realm-less cephadm RGW zone that Rook cannot serve. [PROD]
+# Rook creates realm = zonegroup = zone = `s3` (no --default) and the pools s3.rgw.*. The legacy zone `default` and its
+# default.rgw.* pools are not read or written, and stay as the fallback until a separate clean-up.
+# Exception: Rook applies metadataPool settings plus pg_num/pg_num_min 8 to the SHARED `.rgw.root` pool. Expect it.
+#
+# Apply only after the TLS Secret (sslCertificateRef) and the LoadBalancer Service exist.
+# NEVER delete this CR: deleting a single-site store runs `zone delete`, `zonegroup delete`, `realm rm` for `s3`.
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStore
+metadata:
+  name: s3
+  namespace: rook-ceph
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  preservePoolsOnDelete: true
+  defaultRealm: false                     # while the realm-less legacy zone is the fallback; set true after it is removed
+  metadataPool:
+    failureDomain: host
+    deviceClass: ssd
+    replicated:
+      size: 3
+    parameters:
+      pg_num: "8"                         # explicit: the cluster runs with the autoscaler off; check mon_max_pg_per_osd
+  dataPool:
+    failureDomain: host
+    deviceClass: hdd
+    replicated:
+      size: 3
+    parameters:
+      pg_num: "64"
+  gateway:
+    # hostNetwork ports. Not 8080/8443 (mgr dashboard on mgr nodes), not 7480 (legacy haproxy backends).
+    # Clients never see them: the Service maps 80 -> 8081 and 443 -> 8444.
+    port: 8081
+    securePort: 8444
+    sslCertificateRef: s3-tls             # kubernetes.io/tls Secret (e.g. from cert-manager). RGW reads it only at start: restart before expiry.
+    instances: 3
+    hostNetwork: true
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        memory: "4Gi"
+    placement:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: ceph-storage-node
+                  operator: In
+                  values: ["true"]
+      tolerations:
+        - key: ceph-storage-node
+          operator: Exists
+  hosting:
+    # The operator talks to RGW (admin ops, health checks) through this endpoint: the in-cluster Service over plain HTTP,
+    # so Rook's reconcile depends on nothing outside the cluster and needs no certificate that carries a *.svc name.
+    advertiseEndpoint:
+      dnsName: rook-ceph-rgw-s3-lb.rook-ceph.svc
+      port: 80
+      useTls: false
+    # `rgw dns name` = advertiseEndpoint + these + Rook's own Service name. List every Host header a client sends.
+    dnsNames:
+      - s3.example.com
+      - rook-ceph-rgw-s3-lb.rook-ceph.svc.cluster.local
+  healthCheck:
+    startupProbe:
+      probe: {initialDelaySeconds: 10, timeoutSeconds: 10, periodSeconds: 10, failureThreshold: 60}
+    readinessProbe:
+      probe: {initialDelaySeconds: 10, timeoutSeconds: 10, periodSeconds: 10, failureThreshold: 6}

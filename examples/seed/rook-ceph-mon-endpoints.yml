@@ -1,0 +1,24 @@
+---
+# Seed for Rook's mon tracking. Apply BEFORE the CephCluster exists, after the mons were renamed to letters under cephadm.
+# - data: port 6789 makes Rook advertise both v2 :3300 and v1 :6789 (3300 would mean v2 only).
+# - mapping[].Hostname becomes a kubernetes.io/hostname nodeSelector on each mon Deployment. Until a node with that name
+#   exists, the mon pod stays Pending: Rook knows the mon, cannot start it, and does not need to.
+# - Every mon in `data` must be in `mapping` (a mon missing from mapping becomes a pod-network mon with a ClusterIP: wrong).
+# - maxMonId: 0-based index of the highest letter (a=0 ... g=6). Rook never reuses an id.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rook-ceph-mon-endpoints
+  namespace: rook-ceph
+data:
+  data: "a=192.0.2.21:6789,b=192.0.2.22:6789,c=192.0.2.23:6789,d=192.0.2.24:6789,e=192.0.2.25:6789,f=192.0.2.26:6789,g=192.0.2.27:6789"
+  mapping: >-
+    {"node":{
+    "a":{"Name":"ceph-1","Hostname":"ceph-1","Address":"192.0.2.21"},
+    "b":{"Name":"ceph-2","Hostname":"ceph-2","Address":"192.0.2.22"},
+    "c":{"Name":"ceph-3","Hostname":"ceph-3","Address":"192.0.2.23"},
+    "d":{"Name":"ceph-4","Hostname":"ceph-4","Address":"192.0.2.24"},
+    "e":{"Name":"ceph-5","Hostname":"ceph-5","Address":"192.0.2.25"},
+    "f":{"Name":"ceph-6","Hostname":"ceph-6","Address":"192.0.2.26"},
+    "g":{"Name":"ceph-7","Hostname":"ceph-7","Address":"192.0.2.27"}}}
+  maxMonId: "6"
