@@ -23,7 +23,7 @@ Author: David Burks
 | S3 | rebuilt as a new Rook object store and copied over in one evening window (Rook cannot serve a realm-less RGW zone) |
 | SMB | replaced by a single Samba (sambacc) pod; Rook has no SMB support |
 | cephadm | mgr module disabled and its state removed; cluster `HEALTH_OK` |
-| Performance afterwards | RBD (3x SSD) 517 MB/s write, 1167 MB/s read, 13.6k/33.3k 4K IOPS; CephFS (EC 5+2 HDD) 267/708 MB/s; no regression against the (thin) earlier numbers. See [docs/after-the-migration.md](docs/after-the-migration.md) |
+| Performance afterwards | No regression: every metric we could compare with the (thin) earlier measurements was equal or better, tested from a 25G Kubernetes node and a 2.5G LAN client. Method and findings: [docs/after-the-migration.md](docs/after-the-migration.md#performance-after-the-migration) |
 
 What is not done yet is listed in [Status](#status).
 

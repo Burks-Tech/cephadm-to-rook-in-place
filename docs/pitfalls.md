@@ -165,9 +165,9 @@ Creating a CephObjectStore made Rook apply the store's `metadataPool` settings p
 
 ## P-23. A LoadBalancer IP answered from a slow or multi-homed node
 
-- **Symptom.** LAN clients on 2.5G links got exactly 111 MB/s from S3; the LB IP had moved between nodes 12 times in 16 hours.
-- **Root cause.** MetalLB L2 mode answers ARP from one speaker; with the default advertisement that was a 1G node. The speakers did not run on the tainted storage nodes, so the only fast candidate was one control-plane node.
-- **Fix.** A dedicated `L2Advertisement` for the S3 pool with `nodeSelectors` limited to 10G/25G nodes, the speaker tolerating the storage taint, and `interfaces:` pinned to the Kubernetes VLAN interface so a multi-homed storage host never answers ARP for the LB IP on the Ceph network (the [P-5](#p-5-arp-flux-black-holes-routed-jumbo-traffic) class of failure).
+- **Symptom.** LAN S3 throughput sat exactly at the 1 Gbit line rate, even from a 2.5G client, and the LB IP had moved between nodes 12 times in 16 hours.
+- **Root cause.** MetalLB L2 mode answers ARP from one speaker; with the default advertisement that was a 1G node. The speakers did not run on the tainted storage nodes, so the only fast candidate was one control-plane node. The test client turned out to sit behind a 1G switch uplink as well, so the result was capped twice; check the client's own path (iperf3 to a fast node) before blaming the server side.
+- **Fix.** A dedicated `L2Advertisement` for the S3 pool with `nodeSelectors` limited to 10G/25G nodes, the speaker tolerating the storage taint, and `interfaces:` pinned to the Kubernetes VLAN interface so a multi-homed storage host never answers ARP for the LB IP on the Ceph network (the [P-5](#p-5-arp-flux-black-holes-routed-jumbo-traffic) class of failure). After both fixes the same client was limited only by its own link ([after-the-migration.md](after-the-migration.md#performance-after-the-migration)).
 
 ## Smaller items
 
